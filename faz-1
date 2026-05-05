@@ -1,95 +1,98 @@
-import pandas as pd
-import numpy as np
-import librosa
-import glob
 import os
+import glob
+import numpy as np
+import pandas as pd
+import librosa
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
 
-def extract_mfcc(file_path):
-    """
-    Ses dosyasından frekans düzlemi özniteliği olan MFCC'yi çıkarır.
-    """
+# 1. VERİ OKUMA (Midterm projesindeki mantık)
+def load_metadata(dataset_root="Dataset"):
+    pattern = os.path.join(dataset_root, "**", "Grup_*MetaVeri*.xlsx")
+    excel_files = glob.glob(pattern, recursive=True)
+    
+    frames = []
+    for xls_path in excel_files:
+        try:
+            df = pd.read_excel(xls_path)
+            df["_GRUP_KLASORU"] = os.path.dirname(xls_path)
+            frames.append(df)
+        except Exception as e:
+            pass
+            
+    master_df = pd.concat(frames, ignore_index=True)
+    master_df.columns = master_df.columns.str.strip().str.upper().str.replace(" ", "_")
+    
+    # WAV yollarını oluştur
+    if "DOSYA_ADI" in master_df.columns:
+        master_df["WAV_PATH"] = master_df.apply(
+            lambda r: os.path.join(r["_GRUP_KLASORU"], str(r["DOSYA_ADI"])), axis=1
+        )
+    return master_df
+
+# 2. ÖZNİTELİK ÇIKARIMI (MFCC + ZCR + Enerji)
+def extract_features(file_path):
     try:
-        # Sesi kılavuzdaki standarda (44100 Hz) göre yükle
-        audio, sr = librosa.load(file_path, sr=44100) 
-        # Literatürde altın standart olan MFCC özniteliklerini çıkar 
-        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=40)
-        # Zaman ekseni boyunca ortalamasını alarak 1B diziye dönüştür
+        # Sesi yükle
+        y, sr = librosa.load(file_path, sr=22050)
+        
+        # 1. MFCC (13 katsayı - Hocanın önerdiği frekans düzlemi özniteliği)
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
         mfccs_mean = np.mean(mfccs.T, axis=0)
-        return mfccs_mean
+        
+        # 2. Sıfır Geçiş Oranı (ZCR)
+        zcr_mean = np.mean(librosa.feature.zero_crossing_rate(y))
+        
+        # 3. Enerji (RMS)
+        rms_mean = np.mean(librosa.feature.rms(y=y))
+        
+        # Hepsini tek bir dizi (array) yap
+        features = np.hstack((mfccs_mean, zcr_mean, rms_mean))
+        return features
     except Exception as e:
-        print(f"Hata: {file_path} işlenemedi. Detay: {e}")
         return None
 
-print("1. Excel dosyaları aranıyor...")
-# Merkezi veri yapısındaki tüm grup Excel dosyalarını birleştir 
-excel_files = glob.glob("Midterm_Dataset_2026/**/Grup_*_MetaVeri.xlsx", recursive=True)
-if not excel_files:
-    print("Hata: Excel dosyaları bulunamadı! 'Midterm_Dataset_2026' klasör yolunu kontrol edin.")
-    exit()
-
-master_df = pd.concat([pd.read_excel(f) for f in excel_files], ignore_index=True)
-
-features = []
-labels = []
-
-print("2. Ses dosyaları işleniyor ve öznitelikler çıkarılıyor (Bu işlem birkaç dakika sürebilir)...")
-for index, row in master_df.iterrows():
-    dosya_adi = row['Dosya_Adi']
-    # Nötr, Mutlu, Öfkeli, Üzgün, Şaşkın duygularını hedef etiket olarak alıyoruz 
-    duygu_etiketi = row['Duygu'] 
+# 3. ANA PİPELİNE (Model Eğitimi)
+if __name__ == "__main__":
+    print("Veriler yükleniyor...")
+    df = load_metadata("Dataset")
     
-    # Dosya adından Grup numarasını ayrıştır (Örn: G05 -> Grup_05)
-    grup_kodu = dosya_adi.split('_')[0]
-    klasor_adi = grup_kodu.replace('G', 'Grup_')
+    # Sadece Duygu sütunu dolu olanları al
+    df = df.dropna(subset=['DUYGU'])
     
-    # Güvenli dosya yolu oluştur
-    dosya_yolu = os.path.join("Midterm_Dataset_2026", klasor_adi, dosya_adi)
+    print(f"Toplam {len(df)} dosya bulundu. Öznitelikler çıkarılıyor (Bu işlem birkaç dakika sürebilir)...")
     
-    # os.path.exists ile dosya kontrolü yap 
-    if os.path.exists(dosya_yolu):
-        mfcc_data = extract_mfcc(dosya_yolu)
-        if mfcc_data is not None:
-            features.append(mfcc_data)
-            labels.append(duygu_etiketi)
-    else:
-        print(f"Eksik Dosya Atlandı: {dosya_yolu}")
-
-# Verileri makine öğrenmesi modelinin anlayacağı Numpy dizilerine çevir
-X = np.array(features)
-y = np.array(labels)
-
-print(f"\nToplam işlenen ses dosyası: {len(X)}")
-
-# %80 Eğitim, %20 Test olacak şekilde veriyi ayır
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-# Standartlaştırma (SVM ve KNN algoritmaları verinin ölçeğine hassastır) 
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
-print("3. Makine Öğrenmesi Modeli eğitiliyor (SVM)...")
-# Destek Vektör Makineleri (SVM) kullanarak temel modeli oluştur
-model = SVC(kernel='rbf', C=10, gamma='scale', random_state=42)
-model.fit(X_train_scaled, y_train)
-
-print("4. Model test ediliyor ve başarı ölçülüyor...")
-y_pred = model.predict(X_test_scaled)
-
-# Final Proje talimatlarında istenen Başarı Oranı (Accuracy) 
-accuracy = accuracy_score(y_test, y_pred)
-
-print("\n" + "="*50)
-print(f"🏆 FAZ 1 LİDERLİK TABLOSU SKORU (ACCURACY): %{accuracy * 100:.2f}")
-print("="*50)
-
-# Final Raporu ve Hata Analizi için Karışıklık Matrisi 
-print("\n🔍 KARIŞIKLIK MATRİSİ (Confusion Matrix):")
-print(confusion_matrix(y_test, y_pred))
-
-print("\n📊 SINIFLANDIRMA RAPORU (Detaylı Başarı):")
-print(classification_report(y_test, y_pred))
+    X = []
+    y = []
+    
+    for index, row in df.iterrows():
+        filepath = row["WAV_PATH"]
+        emotion = row["DUYGU"]
+        
+        if os.path.exists(filepath):
+            features = extract_features(filepath)
+            if features is not None:
+                X.append(features)
+                y.append(emotion)
+                
+    X = np.array(X)
+    y = np.array(y)
+    
+    print("\nModel eğitiliyor...")
+    # Veriyi Test ve Eğitim olarak ayır (%80 Eğitim, %20 Test)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    # Random Forest Modeli
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    
+    # Tahmin ve Skor
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    
+    print("="*50)
+    print(f"🎉 FAZ 1 BAŞLANGIÇ MODELİ BAŞARI SKORU (ACCURACY): %{accuracy * 100:.2f}")
+    print("="*50)
+    print("\nDetaylı Rapor:")
+    print(classification_report(y_test, y_pred))
