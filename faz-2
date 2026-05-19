@@ -1,0 +1,136 @@
+import pandas as pd
+import numpy as np
+import librosa
+import glob
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.feature_selection import SelectKBest, f_classif
+import warnings
+warnings.filterwarnings('ignore')
+
+def extract_features_from_audio(X, sample_rate):
+    """Saf ses verisinden öznitelikleri çıkarır."""
+    try:
+        X, _ = librosa.effects.trim(X, top_db=20)
+        if len(X) < sample_rate * 0.5: 
+            return None
+        stft = np.abs(librosa.stft(X))
+        mfccs = np.mean(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=40).T, axis=0)
+        chroma = np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T, axis=0)
+        mel = np.mean(librosa.feature.melspectrogram(y=X, sr=sample_rate).T, axis=0)
+        contrast = np.mean(librosa.feature.spectral_contrast(S=stft, sr=sample_rate).T, axis=0)
+        return np.hstack((mfccs, chroma, mel, contrast))
+    except:
+        return None
+
+def add_white_noise(data):
+    """Sese beyaz gürültü ekler (Modelin ezberlemesini önler)"""
+    noise_amp = 0.005 * np.random.uniform() * np.amax(data)
+    data_noise = data + noise_amp * np.random.normal(size=data.shape[0])
+    return data_noise
+
+def pitch_shift_audio(data, sample_rate):
+    """Sesin perdesini kaydırır (Sanki farklı biri konuşuyormuş gibi)"""
+    return librosa.effects.pitch_shift(y=data, sr=sample_rate, n_steps=2)
+
+print("1. Veri seti okunuyor...")
+excel_files = glob.glob("Dataset/**/Grup_*_MetaVeri.xlsx", recursive=True)
+master_df = pd.concat([pd.read_excel(f) for f in excel_files], ignore_index=True)
+
+features = []
+labels = []
+
+print("2. VERİ ÇOĞALTMA (AUGMENTATION) DEVREDE! Bu işlem 5-10 dakika sürebilir...")
+
+for index, row in master_df.iterrows():
+    dosya_adi = row['Dosya_Adi']
+    duygu_ham = row['Duygu']
+    
+    if pd.isna(dosya_adi) or pd.isna(duygu_ham):
+        continue
+        
+    duygu_etiketi = str(duygu_ham).strip().lower().replace("ş", "s").replace("ü", "u").replace("ö", "o")
+    grup_kodu = str(dosya_adi).split('_')[0]
+    klasor_adi = grup_kodu.replace('G', 'Grup_')
+    
+    if not str(dosya_adi).lower().endswith('.wav'):
+        dosya_adi = str(dosya_adi) + '.wav'
+        
+    dosya_yolu = os.path.join("Dataset", klasor_adi, str(dosya_adi))
+    
+    if os.path.exists(dosya_yolu):
+        try:
+            # Sesi bir kere yükle
+            y, sr = librosa.load(dosya_yolu, sr=22050)
+            
+            # Orijinal Sesi Ekle
+            feat_orig = extract_features_from_audio(y, sr)
+            if feat_orig is not None:
+                features.append(feat_orig)
+                labels.append(duygu_etiketi)
+                
+            # Gürültülü Sesi Ekle
+            y_noise = add_white_noise(y)
+            feat_noise = extract_features_from_audio(y_noise, sr)
+            if feat_noise is not None:
+                features.append(feat_noise)
+                labels.append(duygu_etiketi)
+                
+            # Pitch Shift Sesi Ekle
+            y_pitch = pitch_shift_audio(y, sr)
+            feat_pitch = extract_features_from_audio(y_pitch, sr)
+            if feat_pitch is not None:
+                features.append(feat_pitch)
+                labels.append(duygu_etiketi)
+                
+        except Exception as e:
+            continue
+
+X = np.array(features)
+y = np.array(labels)
+
+print(f"\n🚀 Veri Çoğaltma Başarılı! Toplam ses dosyası {len(X)} adede ulaştı!")
+
+# Eğitim ve Test Ayrımı
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+print("\n3. ÖZNİTELİK SEÇİMİ (FEATURE SELECTION)...")
+# 180 özellikten en güçlü 60 tanesini seç
+selector = SelectKBest(score_func=f_classif, k=60)
+X_train_selected = selector.fit_transform(X_train, y_train)
+X_test_selected = selector.transform(X_test)
+
+# Standartlaştırma
+scaler = StandardScaler()
+X_train_final = scaler.fit_transform(X_train_selected)
+X_test_final = scaler.transform(X_test_selected)
+
+print("\n4. AĞIR SIKLET MODEL SAVAŞLARI (FİNAL RAUNDU) BAŞLIYOR...")
+
+# Aday 1: Yapay Sinir Ağı (Veri arttığı için artık şov yapabilir)
+mlp_model = MLPClassifier(hidden_layer_sizes=(256, 128), alpha=0.001, max_iter=700, random_state=42)
+mlp_model.fit(X_train_final, y_train)
+mlp_acc = accuracy_score(y_test, mlp_model.predict(X_test_final))
+print(f"🧠 Yapay Sinir Ağı (MLP) Skoru: %{mlp_acc * 100:.2f}")
+
+# Aday 2: Optimize SVM
+svm_model = SVC(kernel='rbf', C=100, gamma='auto', class_weight='balanced', random_state=42)
+svm_model.fit(X_train_final, y_train)
+svm_acc = accuracy_score(y_test, svm_model.predict(X_test_final))
+print(f"🗡️ Optimize SVM Skoru: %{svm_acc * 100:.2f}")
+
+# Aday 3: Random Forest
+rf_model = RandomForestClassifier(n_estimators=500, class_weight='balanced', max_depth=20, random_state=42)
+rf_model.fit(X_train_final, y_train)
+rf_acc = accuracy_score(y_test, rf_model.predict(X_test_final))
+print(f"🌲 Optimize Random Forest Skoru: %{rf_acc * 100:.2f}")
+
+print("\n" + "="*50)
+en_iyi_skor = max(mlp_acc, svm_acc, rf_acc) * 100
+print(f"🏆 FİNAL LİDERLİK TABLOSU SKORU: %{en_iyi_skor:.2f}")
+print("="*50)
