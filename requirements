@@ -1,0 +1,27 @@
+# ─────────────────────────────────────────────────────────────────
+# DSP Projesi – Python Bağımlılıkları
+# Kurulum: pip install -r requirements.txt
+# Python 3.10+ gereklidir
+# ─────────────────────────────────────────────────────────────────
+
+# Ses işleme
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Sayısal hesaplama
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Veri yönetimi
+pandas>=2.0.0
+openpyxl>=3.1.0        # Excel (.xlsx) okuma/yazma için
+
+# Görselleştirme
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Web arayüzü
+streamlit>=1.30.0
+
+# Makine öğrenmesi (sadece confusion matrix / accuracy için)
+scikit-learn>=1.3.0
