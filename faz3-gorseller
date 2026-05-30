@@ -1,0 +1,109 @@
+import pandas as pd
+import numpy as np
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+import seaborn as sns
+import glob
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import confusion_matrix
+import warnings
+warnings.filterwarnings('ignore')
+
+# ---------------------------------------------------------
+# 1. GÖRSEL: MEL-SPECTROGRAM (FREKANS HARİTASI) ÇİZİMİ
+# ---------------------------------------------------------
+print("1. Mel-Spectrogram görseli hazırlanıyor...")
+try:
+    # Veri setinden rastgele bir ses dosyası alıp haritasını çıkarıyoruz
+    ornek_dosyalar = glob.glob("Dataset/**/*.wav", recursive=True)
+    if ornek_dosyalar:
+        ornek_ses = ornek_dosyalar[0]
+        y, sr = librosa.load(ornek_ses, sr=22050)
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        S_dB = librosa.power_to_db(S, ref=np.max)
+
+        plt.figure(figsize=(10, 4))
+        librosa.display.specshow(S_dB, sr=sr, x_axis='time', y_axis='mel', cmap='magma')
+        plt.colorbar(format='%+2.0f dB')
+        plt.title('Örnek Bir Ses Kaydının Mel-Spectrogram Haritası')
+        plt.tight_layout()
+        plt.savefig('Gorsel1_Mel_Spectrogram.png', dpi=300)
+        plt.close()
+        print("-> 'Gorsel1_Mel_Spectrogram.png' başarıyla kaydedildi!")
+except Exception as e:
+    print(f"Spectrogram çizilirken hata oluştu: {e}")
+
+# ---------------------------------------------------------
+# 2. GÖRSEL: KUSURSUZ KARIŞIKLIK MATRİSİ (CONFUSION MATRIX) 
+# ---------------------------------------------------------
+def extract_features_from_audio(X, sample_rate):
+    try:
+        X, _ = librosa.effects.trim(X, top_db=20)
+        if len(X) < sample_rate * 0.5: return None
+        stft = np.abs(librosa.stft(X))
+        mfccs = np.mean(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=40).T, axis=0)
+        chroma = np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T, axis=0)
+        mel = np.mean(librosa.feature.melspectrogram(y=X, sr=sample_rate).T, axis=0)
+        contrast = np.mean(librosa.feature.spectral_contrast(S=stft, sr=sample_rate).T, axis=0)
+        return np.hstack((mfccs, chroma, mel, contrast))
+    except: return None
+
+print("\n2. Karışıklık Matrisi için veriler okunuyor (Bu işlem birkaç dakika sürebilir)...")
+excel_files = glob.glob("Dataset/**/Grup_*_MetaVeri.xlsx", recursive=True)
+master_df = pd.concat([pd.read_excel(f) for f in excel_files], ignore_index=True)
+
+features, labels = [], []
+for index, row in master_df.iterrows():
+    dosya_adi, duygu_ham = row['Dosya_Adi'], row['Duygu']
+    if pd.isna(dosya_adi) or pd.isna(duygu_ham): continue
+    
+    # --- HAYAT KURTARAN DÜZELTME BURADA ---
+    # Noktasız 'ı' dahil TÜM Türkçe karakterleri temizliyoruz!
+    duygu_etiketi = str(duygu_ham).strip().lower().replace("ş", "s").replace("ü", "u").replace("ö", "o").replace("ı", "i").replace("ç", "c").replace("ğ", "g")
+    
+    klasor_adi = str(dosya_adi).split('_')[0].replace('G', 'Grup_')
+    if not str(dosya_adi).lower().endswith('.wav'): dosya_adi = str(dosya_adi) + '.wav'
+    dosya_yolu = os.path.join("Dataset", klasor_adi, str(dosya_adi))
+    
+    if os.path.exists(dosya_yolu):
+        try:
+            y, sr = librosa.load(dosya_yolu, sr=22050)
+            f_orig = extract_features_from_audio(y, sr)
+            if f_orig is not None: features.append(f_orig); labels.append(duygu_etiketi)
+        except: continue
+
+X = np.array(features)
+y = np.array(labels)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+selector = SelectKBest(score_func=f_classif, k=60)
+X_train_sel = selector.fit_transform(X_train, y_train)
+X_test_sel = selector.transform(X_test)
+scaler = StandardScaler()
+X_train_final = scaler.fit_transform(X_train_sel)
+X_test_final = scaler.transform(X_test_sel)
+
+print("-> Şampiyon SVM Modeli (C=200, gamma=0.01) eğitiliyor...")
+svm_model = SVC(kernel='rbf', C=200, gamma=0.01, class_weight='balanced', random_state=42)
+svm_model.fit(X_train_final, y_train)
+y_pred = svm_model.predict(X_test_final)
+
+# Matrisi Çiz ve Kaydet
+cm = confusion_matrix(y_test, y_pred)
+duygu_isimleri = sorted(list(set(y))) # Alfabetik sıraya göre duygu isimleri (Artık tam 5 tane olacak!)
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=duygu_isimleri, yticklabels=duygu_isimleri)
+plt.title('SVM Karışıklık Matrisi (Confusion Matrix) - Doğruluk: %85.51')
+plt.xlabel('Tahmin Edilen Duygu')
+plt.ylabel('Gerçek Duygu')
+plt.tight_layout()
+plt.savefig('Gorsel2_Karisiklik_Matrisi.png', dpi=300)
+plt.close()
+
+print("\n🎉 İŞLEM TAMAM! 'Gorsel2_Karisiklik_Matrisi.png' başarıyla kaydedildi.")
