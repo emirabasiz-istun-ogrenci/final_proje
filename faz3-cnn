@@ -1,0 +1,107 @@
+import pandas as pd
+import numpy as np
+import librosa
+import glob
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+import warnings
+warnings.filterwarnings('ignore')
+
+# Derin Öğrenme Kütüphaneleri
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' # Gereksiz TF uyarılarını kapat
+import tensorflow as tf
+from tensorflow.keras import models, layers
+
+def extract_spectrogram_image(file_path, max_pad_len=130):
+    """
+    Sesi ortalama sayılara değil, 2 Boyutlu bir 'Frekans Fotoğrafına' (MFCC Matrisi) çevirir.
+    """
+    try:
+        audio, sr = librosa.load(file_path, sr=22050)
+        audio, _ = librosa.effects.trim(audio, top_db=20)
+        
+        # 40 Katsayılı MFCC haritası çıkar (Zaman x Frekans)
+        mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=40)
+        
+        # Tüm "fotoğrafların" aynı boyutta olması lazım (CNN kuralı)
+        # Uzunsa kes, kısaysa sıfırlarla doldur (Padding)
+        if mfcc.shape[1] > max_pad_len:
+            mfcc = mfcc[:, :max_pad_len]
+        else:
+            pad_width = max_pad_len - mfcc.shape[1]
+            mfcc = np.pad(mfcc, pad_width=((0, 0), (0, pad_width)), mode='constant')
+            
+        return mfcc
+    except Exception as e:
+        return None
+
+print("1. Derin Öğrenme için sesler 'Görüntü Haritalarına' çevriliyor...")
+excel_files = glob.glob("Dataset/**/Grup_*_MetaVeri.xlsx", recursive=True)
+master_df = pd.concat([pd.read_excel(f) for f in excel_files], ignore_index=True)
+
+features = []
+labels = []
+
+for index, row in master_df.iterrows():
+    dosya_adi = row['Dosya_Adi']
+    duygu_ham = row['Duygu']
+    
+    if pd.isna(dosya_adi) or pd.isna(duygu_ham): continue
+        
+    duygu_etiketi = str(duygu_ham).strip().lower().replace("ş", "s").replace("ü", "u").replace("ö", "o")
+    klasor_adi = str(dosya_adi).split('_')[0].replace('G', 'Grup_')
+    if not str(dosya_adi).lower().endswith('.wav'): dosya_adi = str(dosya_adi) + '.wav'
+    dosya_yolu = os.path.join("Dataset", klasor_adi, str(dosya_adi))
+    
+    if os.path.exists(dosya_yolu):
+        # Sadece orijinal sesleri kullanıyoruz, CNN zaten uzamsal özellikleri yakalayacak
+        spec = extract_spectrogram_image(dosya_yolu)
+        if spec is not None:
+            features.append(spec)
+            labels.append(duygu_etiketi)
+
+# Veriyi CNN'in istediği 4 Boyutlu (Görsel) formata sok (Örnek Sayısı, Yükseklik, Genişlik, Kanal)
+X = np.array(features)
+X = X[..., np.newaxis] 
+
+# Etiketleri (Mutlu, Üzgün) bilgisayarın anlayacağı 0, 1, 2 gibi sayılara çevir
+le = LabelEncoder()
+y = le.fit_transform(labels)
+
+print(f"-> Çıkarılan Görüntü Matrisi: {X.shape[0]} adet dosya, {X.shape[1]}x{X.shape[2]} piksel çözünürlüğünde.")
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+print("\n2. EVRİŞİMLİ SİNİR AĞI (CNN) İNŞA EDİLİYOR...")
+model = models.Sequential([
+    # 1. Göz: Görüntüdeki kalın çizgileri (temel frekansları) yakala
+    layers.Conv2D(32, (3, 3), activation='relu', input_shape=(X.shape[1], X.shape[2], 1)),
+    layers.MaxPooling2D((2, 2)),
+    layers.Dropout(0.2), # Ezberlemeyi önle
+    
+    # 2. Göz: Görüntüdeki ince detayları (duygu titremelerini) yakala
+    layers.Conv2D(64, (3, 3), activation='relu'),
+    layers.MaxPooling2D((2, 2)),
+    layers.Dropout(0.2),
+    
+    # Beyin: Gördüklerini düzleştir ve karar ver
+    layers.Flatten(),
+    layers.Dense(128, activation='relu'),
+    layers.Dropout(0.3),
+    layers.Dense(len(np.unique(y)), activation='softmax') # 5 duygu sınıfı
+])
+
+model.compile(optimizer='adam',
+              loss='sparse_categorical_crossentropy',
+              metrics=['accuracy'])
+
+print("\n3. CNN EĞİTİMİ BAŞLIYOR (Sinir ağları veriyi defalarca okur - 30 Epok)...")
+# Modeli eğit
+history = model.fit(X_train, y_train, epochs=30, batch_size=16, validation_data=(X_test, y_test), verbose=1)
+
+print("\n" + "="*50)
+# Son test skoru
+test_loss, test_acc = model.evaluate(X_test,  y_test, verbose=2)
+print(f"🧠 DERİN ÖĞRENME (CNN) FİNAL SKORU: %{test_acc * 100:.2f}")
+print("="*50)
