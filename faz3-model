@@ -1,0 +1,113 @@
+import pandas as pd
+import numpy as np
+import librosa
+import glob
+import os
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import accuracy_score
+import warnings
+warnings.filterwarnings('ignore')
+
+# --- 1. FONKSİYONLAR (Faz 2'deki ile aynı) ---
+def extract_features_from_audio(X, sample_rate):
+    try:
+        X, _ = librosa.effects.trim(X, top_db=20)
+        if len(X) < sample_rate * 0.5: 
+            return None
+        stft = np.abs(librosa.stft(X))
+        mfccs = np.mean(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=40).T, axis=0)
+        chroma = np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T, axis=0)
+        mel = np.mean(librosa.feature.melspectrogram(y=X, sr=sample_rate).T, axis=0)
+        contrast = np.mean(librosa.feature.spectral_contrast(S=stft, sr=sample_rate).T, axis=0)
+        return np.hstack((mfccs, chroma, mel, contrast))
+    except:
+        return None
+
+def add_white_noise(data):
+    noise_amp = 0.005 * np.random.uniform() * np.amax(data)
+    return data + noise_amp * np.random.normal(size=data.shape[0])
+
+def pitch_shift_audio(data, sample_rate):
+    return librosa.effects.pitch_shift(y=data, sr=sample_rate, n_steps=2)
+
+# --- 2. VERİ OKUMA VE ÇOĞALTMA ---
+print("1. Veriler okunuyor ve çoğaltılıyor (Data Augmentation)...")
+excel_files = glob.glob("Dataset/**/Grup_*_MetaVeri.xlsx", recursive=True)
+master_df = pd.concat([pd.read_excel(f) for f in excel_files], ignore_index=True)
+
+features, labels = [], []
+
+for index, row in master_df.iterrows():
+    dosya_adi = row['Dosya_Adi']
+    duygu_ham = row['Duygu']
+    
+    if pd.isna(dosya_adi) or pd.isna(duygu_ham): continue
+        
+    duygu_etiketi = str(duygu_ham).strip().lower().replace("ş", "s").replace("ü", "u").replace("ö", "o")
+    klasor_adi = str(dosya_adi).split('_')[0].replace('G', 'Grup_')
+    
+    if not str(dosya_adi).lower().endswith('.wav'): dosya_adi = str(dosya_adi) + '.wav'
+    dosya_yolu = os.path.join("Dataset", klasor_adi, str(dosya_adi))
+    
+    if os.path.exists(dosya_yolu):
+        try:
+            y, sr = librosa.load(dosya_yolu, sr=22050)
+            
+            # Orijinal
+            f_orig = extract_features_from_audio(y, sr)
+            if f_orig is not None: features.append(f_orig); labels.append(duygu_etiketi)
+                
+            # Gürültülü
+            f_noise = extract_features_from_audio(add_white_noise(y), sr)
+            if f_noise is not None: features.append(f_noise); labels.append(duygu_etiketi)
+                
+            # Pitch Shift
+            f_pitch = extract_features_from_audio(pitch_shift_audio(y, sr), sr)
+            if f_pitch is not None: features.append(f_pitch); labels.append(duygu_etiketi)
+        except: continue
+
+X = np.array(features)
+y = np.array(labels)
+print(f"-> Veri çoğaltma tamamlandı. Toplam dosya: {len(X)}")
+
+# --- 3. ÖZNİTELİK SEÇİMİ VE ÖLÇEKLENDİRME ---
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+selector = SelectKBest(score_func=f_classif, k=60)
+X_train_sel = selector.fit_transform(X_train, y_train)
+X_test_sel = selector.transform(X_test)
+
+scaler = StandardScaler()
+X_train_final = scaler.fit_transform(X_train_sel)
+X_test_final = scaler.transform(X_test_sel)
+
+# --- 4. GRID SEARCH (SABIR GEREKTİREN KISIM) ---
+print("\n2. YZ Motoru zorlanıyor... GridSearchCV başlatıldı (Lütfen bekleyin, 10-15 dk sürebilir)...")
+
+# Bilgisayarın deneyeceği kombinasyon havuzu
+param_grid = {
+    'C': [10, 50, 100, 200, 500],
+    'gamma': ['scale', 'auto', 0.1, 0.01, 0.001],
+    'kernel': ['rbf']
+}
+
+# Modeli GridSearch'e bağla
+svm = SVC(class_weight='balanced', random_state=42)
+grid_search = GridSearchCV(estimator=svm, param_grid=param_grid, cv=5, scoring='accuracy', n_jobs=-1, verbose=2)
+
+# Yüzlerce modeli eğitip test et
+grid_search.fit(X_train_final, y_train)
+
+# --- 5. SONUÇLAR ---
+best_model = grid_search.best_estimator_
+final_accuracy = accuracy_score(y_test, best_model.predict(X_test_final))
+
+print("\n" + "="*50)
+print("🏆 OPTİMİZASYON TAMAMLANDI!")
+print("="*50)
+print(f"Bulunan En Kusursuz Parametreler: {grid_search.best_params_}")
+print(f"🚀 FİNAL LİDERLİK TABLOSU SKORU (ACCURACY): %{final_accuracy * 100:.2f}")
+print("="*50)
